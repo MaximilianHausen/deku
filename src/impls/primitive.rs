@@ -60,7 +60,7 @@ impl DekuReader<'_, (Endian, ByteSize, Order)> for u8 {
     }
 }
 
-#[cfg(feature = "bits")]
+/*#[cfg(feature = "bits")]
 impl DekuWriter<(Endian, BitSize)> for u8 {
     /// Ignore endian, as this is a `u8`
     #[inline(always)]
@@ -72,7 +72,7 @@ impl DekuWriter<(Endian, BitSize)> for u8 {
         // endian doesn't matter
         <u8>::to_writer(self, writer, (Endian::Big, bit_size, Order::default()))
     }
-}
+}*/
 
 #[cfg(feature = "bits")]
 impl DekuWriter<(Endian, BitSize, Order)> for u8 {
@@ -741,7 +741,7 @@ macro_rules! ForwardDekuRead {
 // - (ByteSize, Order)
 // - (ByteSize)
 // Optimised implementation: (Endian); Doesn't need to verify the input size
-// - (Endian, Order) TODO: Should anything including Order be forwarded to BitSize implementations? 
+// - (Endian, Order) TODO: Should anything including Order be forwarded to BitSize implementations?
 // - (Order)
 // - ()
 
@@ -881,7 +881,7 @@ macro_rules! ForwardDekuWriteBytes {
 // - (BitSize)
 
 macro_rules! ImplDekuWriteBits {
-    ($typ:ty, $signed_type:ident) => {
+    ($typ:ty, Unsigned) => {
         #[cfg(feature = "bits")]
         impl DekuWriter<(Endian, BitSize, Order)> for $typ {
             #[inline]
@@ -1005,99 +1005,14 @@ macro_rules! ImplDekuWriteBits {
             }
         }
     };
-    
-}
-
-macro_rules! DekuSignedStuff {
-    ($typ:ty, Unsigned) => {
-        #[cfg(feature = "bits")]
-        impl DekuWriter<(Endian, BitSize)> for $typ {
-            #[inline(always)]
-            fn to_writer<W: Write + Seek>(
-                &self,
-                writer: &mut Writer<W>,
-                (endian, size): (Endian, BitSize),
-            ) -> Result<(), DekuError> {
-                let input = match endian {
-                    Endian::Little => self.to_le_bytes(),
-                    Endian::Big => self.to_be_bytes(),
-                };
-
-                let bit_size: usize = size.0;
-
-                let input_bits = input.view_bits::<Msb0>();
-
-                if bit_size > input_bits.len() {
-                    return Err(deku_error!(
-                        DekuError::InvalidParam,
-                        "bit size is larger than input",
-                        "{} exceeds {}",
-                        bit_size,
-                        input_bits.len()
-                    ));
-                }
-
-                if matches!(endian, Endian::Little) {
-                    // Check if this is a value that will fit inside the required bits, if
-                    // not, throw an error
-                    let input_bits_lsb = input.view_bits::<Lsb0>();
-                    if let Some(last) = input_bits_lsb.last_one() {
-                        let last = last + 1;
-                        let max = bit_size;
-                        if last > max {
-                            return Err(deku_error!(
-                                DekuError::InvalidParam,
-                                "bit size of input is larger than requested size",
-                                "{} exceeds {}",
-                                last,
-                                bit_size
-                            ));
-                        }
-                    }
-
-                    // Example read 10 bits u32 [0xAB, 0b11_000000]
-                    // => [10101011, 00000011, 00000000, 00000000]
-                    let mut remaining_bits = bit_size;
-                    for chunk in input_bits.chunks(8) {
-                        if chunk.len() > remaining_bits {
-                            writer.write_bits(&chunk[chunk.len() - remaining_bits..])?;
-                            break;
-                        } else {
-                            writer.write_bits(&chunk)?;
-                        }
-                        remaining_bits -= chunk.len();
-                    }
-                } else {
-                    const MAX_TYPE_BITS: usize = BitSize::of::<$typ>().0;
-                    // Check for extra bits before sending into writer
-                    if let Some(first) = input_bits.first_one() {
-                        let max = (MAX_TYPE_BITS - bit_size);
-                        if max > first {
-                            return Err(deku_error!(
-                                DekuError::InvalidParam,
-                                "bit size of input is larger than bit requested size",
-                                "{} exceeds {}",
-                                MAX_TYPE_BITS - first,
-                                bit_size
-                            ));
-                        }
-                    }
-                    // Example read 10 bits u32 [0xAB, 0b11_000000]
-                    // => [00000000, 00000000, 00000010, 10101111]
-                    writer.write_bits(&input_bits[input_bits.len() - bit_size..])?;
-                }
-                Ok(())
-            }
-        }
-    };
     ($typ:ty, Signed) => {
         #[cfg(feature = "bits")]
-        impl DekuWriter<(Endian, BitSize)> for $typ {
-            #[inline(always)]
+        impl DekuWriter<(Endian, BitSize, Order)> for $typ {
+            #[inline]
             fn to_writer<W: Write + Seek>(
                 &self,
                 writer: &mut Writer<W>,
-                (endian, size): (Endian, BitSize),
+                (endian, size, order): (Endian, BitSize, Order),
             ) -> Result<(), DekuError> {
                 let input = match endian {
                     Endian::Little => self.to_le_bytes(),
@@ -1118,10 +1033,9 @@ macro_rules! DekuSignedStuff {
                     ));
                 }
 
-                if matches!(endian, Endian::Little) {
-                    // Check if this is a value that will fit inside the required bits, if
-                    // not, throw an error
-                    if *self >= 0 {
+                match (endian, order) {
+                    (Endian::Little, Order::Lsb0) | (Endian::Little, Order::Msb0) => {
+                        if *self >= 0 {
                         let input_bits_lsb = input.view_bits::<Lsb0>();
                         if let Some(last) = input_bits_lsb.last_one() {
                             let last = last + 2;
@@ -1153,20 +1067,22 @@ macro_rules! DekuSignedStuff {
                         }
                     }
 
-                    // Example read 10 bits u32 [0xAB, 0b11_000000]
-                    // => [10101011, 00000011, 00000000, 00000000]
-                    let mut remaining_bits = bit_size;
-                    for chunk in input_bits.chunks(8) {
-                        if chunk.len() > remaining_bits {
-                            writer.write_bits(&chunk[chunk.len() - remaining_bits..])?;
-                            break;
-                        } else {
-                            writer.write_bits(&chunk)?;
+                        let mut remaining_bits = bit_size;
+                        for chunk in input_bits.chunks(8) {
+                            if chunk.len() > remaining_bits {
+                                writer.write_bits_order(
+                                    &chunk[chunk.len() - remaining_bits..],
+                                    order,
+                                )?;
+                                break;
+                            } else {
+                                writer.write_bits_order(&chunk, order)?;
+                            }
+                            remaining_bits -= chunk.len();
                         }
-                        remaining_bits -= chunk.len();
                     }
-                } else {
-                    const MAX_TYPE_BITS: usize = BitSize::of::<$typ>().0;
+                    (Endian::Big, Order::Lsb0) => {
+                        const MAX_TYPE_BITS: usize = BitSize::of::<$typ>().0;
                     // Check for extra bits before sending into writer
                     if *self >= 0 {
                         if let Some(first) = input_bits.first_one() {
@@ -1195,10 +1111,69 @@ macro_rules! DekuSignedStuff {
                             }
                         }
                     }
-                    // Example read 10 bits u32 [0xAB, 0b11_000000]
-                    // => [00000000, 00000000, 00000010, 10101111]
-                    writer.write_bits(&input_bits[input_bits.len() - bit_size..])?;
+
+                        if bit_size <= 8 {
+                            writer.write_bits_order(
+                                &input_bits[input_bits.len() - bit_size..],
+                                order,
+                            )?;
+                        } else {
+                            let mut remaining_bits = bit_size;
+                            for chunk in input_bits.chunks(8) {
+                                if chunk.len() > remaining_bits {
+                                    writer.write_bits_order(
+                                        &chunk[chunk.len() - remaining_bits..],
+                                        order,
+                                    )?;
+                                    break;
+                                } else {
+                                    writer.write_bits_order(&chunk, order)?;
+                                }
+                                remaining_bits -= chunk.len();
+                            }
+                        }
+                    }
+                    (Endian::Big, Order::Msb0) => {
+                        const MAX_TYPE_BITS: usize = BitSize::of::<$typ>().0;
+                    // Check for extra bits before sending into writer
+                    if *self >= 0 {
+                        if let Some(first) = input_bits.first_one() {
+                            let max = (MAX_TYPE_BITS - bit_size);
+                            if max + 1 > first {
+                                return Err(deku_error!(
+                                    DekuError::InvalidParam,
+                                    "bit size of input is larger than bit requested size",
+                                    "{} exceeds {}",
+                                    MAX_TYPE_BITS - first,
+                                    bit_size
+                                ));
+                            }
+                        }
+                    } else {
+                        if let Some(first) = input_bits.first_zero() {
+                            let max = (MAX_TYPE_BITS - bit_size);
+                            if max + 1 > first {
+                                return Err(deku_error!(
+                                    DekuError::InvalidParam,
+                                    "bit size of input is larger than bit requested size",
+                                    "{} exceeds {}",
+                                    MAX_TYPE_BITS - first,
+                                    bit_size
+                                ));
+                            }
+                        }
+                    }
+
+                        // big endian
+                        // Example read 10 bits u32 [0xAB, 0b11_000000]
+                        // => [00000000, 00000000, 00000010, 10101111]
+                        writer.write_bits_order(
+                            &input_bits[input_bits.len() - bit_size..],
+                            Order::Msb0,
+                        )?;
+                    }
                 }
+
                 Ok(())
             }
         }
@@ -1210,7 +1185,7 @@ macro_rules! ForwardDekuWriteBits {
         // Forward anything including BitSize to (Endian, BitSize, Order)
 
         // TODO: Enable forward after unifying bit writing
-        /*#[cfg(feature = "bits")]
+        #[cfg(feature = "bits")]
         impl DekuWriter<(Endian, BitSize)> for $typ {
             #[inline(always)]
             fn to_writer<W: Write + Seek>(
@@ -1220,7 +1195,7 @@ macro_rules! ForwardDekuWriteBits {
             ) -> Result<(), DekuError> {
                 <$typ>::to_writer(self, writer, (endian, bit_size, Order::default()))
             }
-        }*/
+        }
 
         #[cfg(feature = "bits")]
         impl DekuWriter<(BitSize, Order)> for $typ {
@@ -1242,7 +1217,11 @@ macro_rules! ForwardDekuWriteBits {
                 writer: &mut Writer<W>,
                 bit_size: BitSize,
             ) -> Result<(), DekuError> {
-                <$typ>::to_writer(self, writer, (Endian::default(), bit_size, Order::default()))
+                <$typ>::to_writer(
+                    self,
+                    writer,
+                    (Endian::default(), bit_size, Order::default()),
+                )
             }
         }
     };
@@ -1259,7 +1238,6 @@ macro_rules! ImplDekuTraitsUnsigned {
         ImplDekuWriteBytes!($typ);
         ForwardDekuWriteBytes!($typ);
         ImplDekuWriteBits!($typ, Unsigned);
-        DekuSignedStuff!($typ, Unsigned);
         ForwardDekuWriteBits!($typ);
     };
     ($typ:ty, $inner:ty) => {
@@ -1270,7 +1248,6 @@ macro_rules! ImplDekuTraitsUnsigned {
         ImplDekuWriteBytes!($typ);
         ForwardDekuWriteBytes!($typ);
         ImplDekuWriteBits!($typ, Unsigned);
-        DekuSignedStuff!($typ, Unsigned);
         ForwardDekuWriteBits!($typ);
     };
 }
@@ -1283,7 +1260,6 @@ macro_rules! ImplDekuTraitsSigned {
         ImplDekuWriteBytes!($typ);
         ForwardDekuWriteBytes!($typ);
         ImplDekuWriteBits!($typ, Signed);
-        DekuSignedStuff!($typ, Signed);
         ForwardDekuWriteBits!($typ);
     };
 }
