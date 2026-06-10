@@ -267,6 +267,52 @@ fn check_little_signed_i10_decode_encode_negative_value() {
 }
 
 #[test]
+fn check_little_signed_i10_decode_encode_negative_value_with_bitorder() {
+    // Separate test case with specified bit_order because it might trigger a different implementation
+    #[derive(Debug, PartialEq, Default, Clone, DekuRead, DekuWrite)]
+    pub struct TestStruct {
+        #[deku(bits = "1")]
+        pub a: bool,
+        #[deku(pad_bits_before = "5", bits = "10", endian = "little", bit_order = "msb")]
+        pub b: i16,
+    }
+
+    let buffer = vec![0b10000011, 0b11111011];
+    //                                 ^^    ^^^^^^^^10 bits
+
+    let ((remaining_bytes, offset), mut test_struct) =
+        TestStruct::from_bytes((&buffer, 0)).expect("decoder error");
+
+    // everything consumed?
+    assert_eq!(offset, 0);
+    assert_eq!(remaining_bytes.len(), 0);
+
+    // check content
+    assert!(test_struct.a);
+    assert_eq!(test_struct.b, -2);
+
+    // write back and check
+    assert_eq!(buffer, test_struct.to_bytes().expect("encode error"));
+
+    test_struct.b = -512;
+    assert!(test_struct.to_bytes().is_ok());
+
+    test_struct.b = -513;
+    assert!(test_struct.to_bytes().is_err());
+
+    let mut cursor = Cursor::new(buffer.clone());
+    let (_, val) = TestStruct::from_reader((&mut cursor, 0)).unwrap();
+    assert!(val.a);
+    assert_eq!(val.b, -2);
+
+    let mut buffer2 = vec![];
+    let mut cursor2 = Cursor::new(&mut buffer2);
+    let mut writer = Writer::new(&mut cursor2);
+    val.to_writer(&mut writer, ()).unwrap();
+    assert_eq!(buffer2, buffer);
+}
+
+#[test]
 fn check_big_unsigned_u16_decode_encode_positive_value() {
     #[derive(Debug, PartialEq, Default, Clone, DekuRead, DekuWrite)]
     pub struct TestStruct {
